@@ -30,6 +30,10 @@ def get_db():
     finally:
         db.close()
 
+@app.get("/")
+def read_root():
+    return {"status": "online", "message": "True Trace Forge API is running"}
+
 def compute_hash(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
