@@ -82,8 +82,8 @@ const Analyze = () => {
         });
       }
     } catch (error) {
-      console.error(error);
-      toast.error("Analysis Failed", { description: "Could not communicate with the Python backend API." });
+      console.error("Full Connection Error Detail:", error);
+      toast.error("Analysis Failed", { description: "Could not communicate with the Python backend API. Check browser console for security/CORS details." });
     } finally {
       setAnalyzing(false);
     }
