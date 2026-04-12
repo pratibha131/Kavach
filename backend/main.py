@@ -1,4 +1,5 @@
-from fastapi import FastAPI, Depends, File, UploadFile, HTTPException
+from fastapi import FastAPI, Depends, File, UploadFile, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from database import SessionLocal, engine, Base
@@ -7,6 +8,7 @@ import uuid
 import random
 import json
 import hashlib
+import traceback
 from datetime import datetime
 from ml_engine import analyze_media
 
@@ -14,6 +16,14 @@ from ml_engine import analyze_media
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    print(traceback.format_exc()) # Log it to Render logs
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc), "traceback": traceback.format_exc()},
+    )
 
 # Hardened CORS for Production
 origins = [
@@ -63,7 +73,7 @@ async def analyze_file(file: UploadFile = File(...), db: Session = Depends(get_d
     # Genuine Mathematical Forensic Analysis
     ml_results = analyze_media(content, file_type)
     
-    confidence = ml_results["confidence"]
+    confidence = float(ml_results["confidence"])
     is_deepfake = confidence >= 70.0
     is_suspicious = confidence >= 35.0 and not is_deepfake
     
@@ -79,9 +89,9 @@ async def analyze_file(file: UploadFile = File(...), db: Session = Depends(get_d
         timestamp=now.strftime("%Y-%m-%d %H:%M:%S"),
         verdict=verdict,
         confidence=confidence,
-        faceSwap=ml_results["faceSwap"],
-        voiceClone=ml_results["voiceClone"],
-        synthetic=ml_results["synthetic"],
+        faceSwap=float(ml_results["faceSwap"]),
+        voiceClone=float(ml_results["voiceClone"]),
+        synthetic=float(ml_results["synthetic"]),
         fingerprint=f"MFP-{now.year}-{actual_hash[:6].upper()}",
         modelFamily="GAN-StyleTransfer v3",
         severity=severity,
