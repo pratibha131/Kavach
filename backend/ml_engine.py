@@ -1,18 +1,39 @@
 import numpy as np
-import cv2
 import io
 from PIL import Image, ImageChops, ImageEnhance
+import wave
 
 def compute_shannon_entropy(image_np):
     """Calculates 2D Shannon Entropy."""
     if len(image_np.shape) == 3:
-        image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2GRAY)
+        # Match OpenCV BGR-to-grayscale weights and round to uint8
+        image_np = np.round(np.dot(image_np[..., :3], [0.2989, 0.5870, 0.1140])).astype(np.uint8)
     
-    hist = cv2.calcHist([image_np], [0], None, [256], [0, 256])
-    hist = hist.ravel() / hist.sum()
+    hist, _ = np.histogram(image_np, bins=256, range=(0, 256))
+    hist = hist / hist.sum()
     
     entropy = -np.sum(hist * np.log2(hist + 1e-7))
     return float(entropy)
+
+def sobel_filters(image):
+    """Computes Sobel gradients with reflect padding to match OpenCV border behavior."""
+    # Pad image to preserve borders and match OpenCV behavior
+    image = np.pad(image, 1, mode='reflect')
+    h, w = image.shape
+    
+    Kx = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=np.float64)
+    Ky = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=np.float64)
+    
+    sobel_x = np.zeros((h - 2, w - 2), dtype=np.float64)
+    sobel_y = np.zeros((h - 2, w - 2), dtype=np.float64)
+    
+    for i in range(3):
+        for j in range(3):
+            sub_img = image[i:h-2+i, j:w-2+j]
+            sobel_x += sub_img * Kx[i, j]
+            sobel_y += sub_img * Ky[i, j]
+            
+    return np.sqrt(sobel_x**2 + sobel_y**2)
 
 def analyze_spatial_entropy(file_bytes: bytes) -> dict:
     """
@@ -20,22 +41,17 @@ def analyze_spatial_entropy(file_bytes: bytes) -> dict:
     High/Low abnormal entropy indicates AI generative artifacts.
     """
     try:
-        nparr = np.frombuffer(file_bytes, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if img is None:
-            # Fallback for unsupported files (e.g. video bytes): deterministic score
-            import hashlib
-            file_hash = hashlib.md5(file_bytes).hexdigest()
-            hash_val = int(file_hash[:4], 16)
-            score = 15.0 + (hash_val % 700) / 10.0
-            return {"score": score, "reason": "Unsupported format"}
-            
+        # Decode image from bytes using Pillow
+        img_pil = Image.open(io.BytesIO(file_bytes)).convert("RGB")
+        img = np.array(img_pil)
+        
         global_entropy = compute_shannon_entropy(img)
         
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-        sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-        gradient_magnitude = np.sqrt(sobel_x**2 + sobel_y**2)
+        # Grayscale for Sobel
+        gray_pil = img_pil.convert("L")
+        gray = np.array(gray_pil, dtype=np.float64)
+        
+        gradient_magnitude = sobel_filters(gray)
         mean_gradient = float(np.mean(gradient_magnitude))
         
         # Normalize scores based on standard photographic dataset variance
@@ -69,8 +85,9 @@ def perform_ela(file_bytes: bytes) -> dict:
         scale = 255.0 / max_diff
         ela_img = ImageEnhance.Brightness(diff).enhance(scale)
         
-        ela_np = np.array(ela_img)
-        gray_ela = cv2.cvtColor(ela_np, cv2.COLOR_RGB2GRAY)
+        # Convert to grayscale using Pillow instead of cv2
+        gray_ela_pil = ela_img.convert("L")
+        gray_ela = np.array(gray_ela_pil)
         
         hotspots = np.sum(gray_ela > 60)
         total_pixels = gray_ela.shape[0] * gray_ela.shape[1]
@@ -86,19 +103,33 @@ def perform_ela(file_bytes: bytes) -> dict:
         return {"score": score}
 
 def analyze_audio_synthetic(file_bytes: bytes) -> dict:
-    """Analyzes audio signals for synthetic synthesis patterns using SciPy."""
-    import scipy.io.wavfile as wav
+    """Analyzes audio signals for synthetic synthesis patterns using built-in wave module."""
     try:
-        sample_rate, data = wav.read(io.BytesIO(file_bytes))
-        if len(data.shape) > 1:
-            data = data.mean(axis=1) # stereo to mono
+        with wave.open(io.BytesIO(file_bytes), 'rb') as wav_file:
+            params = wav_file.getparams()
+            n_channels, sampwidth, framerate, n_frames = params[:4]
+            str_data = wav_file.readframes(n_frames)
             
-        crossings = np.nonzero(np.diff(data > 0))[0]
-        zcr = len(crossings) / len(data)
-        
-        # Synthetic deepfake voices lack authentic human micro-variance in ZCR
-        score = min(92.0, abs(zcr - 0.04) * 600)
-        return {"score": score}
+            if sampwidth == 1:
+                data = np.frombuffer(str_data, dtype=np.uint8) - 128
+            elif sampwidth == 2:
+                data = np.frombuffer(str_data, dtype=np.int16)
+            elif sampwidth == 4:
+                data = np.frombuffer(str_data, dtype=np.int32)
+            else:
+                raise ValueError("Unsupported sample width")
+            
+            # Reshape for multi-channel if necessary, then take mean
+            if n_channels > 1:
+                data = data.reshape(-1, n_channels)
+                data = data.mean(axis=1) # stereo to mono
+                
+            crossings = np.nonzero(np.diff(data > 0))[0]
+            zcr = len(crossings) / len(data)
+            
+            # Synthetic deepfake voices lack authentic human micro-variance in ZCR
+            score = min(92.0, abs(zcr - 0.04) * 600)
+            return {"score": score}
     except Exception:
         # Fallback to byte entropy mapping for MP3/compressed synthesis
         nparr = np.frombuffer(file_bytes, np.uint8)
